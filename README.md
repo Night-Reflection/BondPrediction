@@ -20,4 +20,28 @@ BONDPREDICTION/
 │
 ├── .gitignore              # Tells Git to ignore environments, cache, and logs
 ├── requirements.txt        # Third-party dependencies
-└── run.py                  # Main pipeline orchestrator and data-integrity checker
+└── run.py                  # Main pipeline orchestrator
+```
+
+## Features
+* **Currency Conversion:** Automatically downloads matching EURUSD=X rates to convert historical USD prices to EUR.
+* **Metric Standardization:** Automatically scales standard US exchange units (Troy Ounces, Pounds) into uniform prices per Gram.
+* **Deduplication:** Robust sorting logic handles live-data pipeline edge cases by removing duplicate timestamps, maintaining chronological data integrity.
+* **Targeted Recovery:** run.py calls functions.py which validates the structural health of local datasets post-sync and triggers localized recovery fetches exclusively for failed assets.
+
+## Quick Start
+
+1. **Install Dependencies:**
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+2. **Run the Pipeline:**
+    ```bash
+    python run.py
+    ```
+
+## Self note
+git add .\
+git commit -m "Reason"\
+git push
