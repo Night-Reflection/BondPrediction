@@ -1,0 +1,21 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: prediction_db_container
+    restart: always
+    environment:
+      # user/pass you use in Python connection string
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: CommoditiesPredictionPass123
+      # Postgres will automatically create this DB first, before running init.sql
+      POSTGRES_DB: market_predictions
+    ports:
+      - "5433:5432"
+    volumes:
+      # Mounts init.sql into the folder Postgres watches for initialization scripts
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      # Persists historical data on hard drive so it survives container restarts
+      - postgres_market_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_market_data:

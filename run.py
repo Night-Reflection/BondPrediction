@@ -1,7 +1,7 @@
 from app import fetch_data as fd, functions as fn
 
 # -- CONFIGURATIONS--
-TRACKED_COMMODITIES = ["gold", "silver", "copper"]
+TRACKED_COMMODITIES = ["Gold", "Silver", "Copper"]
 
 
 def main():

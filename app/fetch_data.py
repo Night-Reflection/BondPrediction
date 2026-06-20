@@ -4,13 +4,14 @@ import logging
 from logging.handlers import RotatingFileHandler
 import pandas as pd
 import requests
+from sqlalchemy import create_engine, text
 
 # --- CONFIGURATION ---
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(BASE_DIR, "data")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
+DB_URL = "postgresql://admin:CommoditiesPredictionPass123@127.0.0.1:5433/market_predictions"
+engine = create_engine(DB_URL, echo=False)
 
-os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # --- ROTATING LOGGER SETUP ---
@@ -29,23 +30,23 @@ if not logger.handlers:
     logger.addHandler(console_handler)
 
 TICKER_MAPPING = {
-    "gold": "GC=F",
-    "silver": "SI=F",
-    "copper": "HG=F"
+    "Gold": "GC=F",
+    "Silver": "SI=F",
+    "Copper": "HG=F"
 }
 
 def fetch_and_save_commodity_data(requested_commodities=None):
     """
     Fetches historical data from Yahoo Finance.
     
-    requested_commodities: List of strings e.g., ['gold'] or ['gold', 'copper']. 
+    requested_commodities: List of strings e.g., ['Gold'] or ['Gold', 'Copper']. 
     
     If None, fetches all available commodities.
     """
     if requested_commodities is None:
         targets = list(TICKER_MAPPING.keys())
     else:
-        targets = [c.lower() for c in requested_commodities if c.lower() in TICKER_MAPPING]
+        targets = [c for c in requested_commodities if c in TICKER_MAPPING]
 
     if not targets:
         logger.warning("No valid commodities requested for fetch.")
@@ -54,9 +55,9 @@ def fetch_and_save_commodity_data(requested_commodities=None):
     logger.info(f"Executing network sync for: {', '.join(targets).title()}...")
     
     today = datetime.datetime.now()
-    thirty_days_ago = today - datetime.timedelta(days=30)
+    one_year_ago = today - datetime.timedelta(days=1*365)
     
-    start_ts = int(thirty_days_ago.timestamp())
+    start_ts = int(one_year_ago.timestamp())
     end_ts = int(today.timestamp())
 
     try:
@@ -100,9 +101,9 @@ def fetch_and_save_commodity_data(requested_commodities=None):
             closes = quote["close"]
             volumes = quote["volume"]
             
-            if asset_name in ["gold", "silver"]:
+            if asset_name in ["Gold", "Silver"]:
                 unit_divider = 31.1034768  # Convert Troy Ounce -> Grams
-            elif asset_name == "copper":
+            elif asset_name == "Copper":
                 unit_divider = 453.59237   # Convert Pounds -> Grams
             else:
                 unit_divider = 1.0
@@ -138,9 +139,42 @@ def fetch_and_save_commodity_data(requested_commodities=None):
             df = df.sort_values(by=['Timestamp', 'Volume'], ascending=[True, False])
             df = df.drop_duplicates(subset=['Timestamp'], keep='first')
             
-            target_csv = os.path.join(DATA_DIR, f"{asset_name}_30d.csv")
-            df.to_csv(target_csv, index=False)
-            logger.info(f"Successfully committed {len(df)} rows to data container: {target_csv}")
+            with engine.connect() as conn:
+                result = conn.execute(text("SELECT id FROM assets WHERE name ILIKE :name"), {"name": asset_name}).fetchone()
+                
+                if result:
+                    asset_id = result[0]
+                    
+                    df = df.rename(columns={
+                        "Timestamp": "timestamp",
+                        "Open_EUR": "open_eur",
+                        "High_EUR": "high_eur",
+                        "Low_EUR": "low_eur",
+                        "Close_EUR": "close_eur",
+                        "Volume": "volume"
+                    })
+                    
+                    df['asset_id'] = asset_id
+                    
+                    try:
+                        
+                        db_records = df.to_dict(orient='records')
+                        
+                        insert_query = text("""
+                            INSERT INTO price_history (asset_id, timestamp, open_eur, high_eur, low_eur, close_eur, volume)
+                            VALUES (:asset_id, :timestamp, :open_eur, :high_eur, :low_eur, :close_eur, :volume)
+                            ON CONFLICT (asset_id, timestamp) DO NOTHING;
+                            """)
+                        
+                        conn.execute(insert_query, db_records)
+                        conn.commit()
+                        
+                        logger.info(f"Successfully committed {len(df)} rows to database for asset: {asset_name}")
+                        
+                    except Exception as e:
+                        logger.error(f"Failed to write data to database for {asset_name}: {str(e)}")
+                else:
+                    logger.error(f"Asset {asset_name} not found in database. Skipping database write.")
 
         logger.info("Requested commodity data processing completed.")
 
