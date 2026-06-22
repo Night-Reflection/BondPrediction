@@ -1,15 +1,39 @@
 import os
 import pandas as pd
-from .fetch_data import logger, engine
+import logging
+from logging.handlers import RotatingFileHandler
 import datetime
-from sqlalchemy import text
+from sqlalchemy import text, create_engine
+
+# --- CONFIGURATION ---
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DB_URL = "postgresql://admin:CommoditiesPredictionPass123@127.0.0.1:5433/market_predictions"
+engine = create_engine(DB_URL, echo=False)
+LOG_DIR = os.path.join(BASE_DIR, "logs")
+
+os.makedirs(LOG_DIR, exist_ok=True)
+
+# --- ROTATING LOGGER SETUP ---
+log_filename = os.path.join(LOG_DIR, "app.log")
+logger = logging.getLogger("BulletproofDataSync")
+logger.setLevel(logging.INFO)
+
+if not logger.handlers:
+    file_handler = RotatingFileHandler(log_filename, maxBytes=10*1024*1024, backupCount=2)
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
 
 def verify_data_integrity(commodity):
     """
     Performs a check if data exists in PostgreSQL and if the records are up to date
     """
     # Default allowed delay during the week
-    allowed_delay_hours = 4
+    allowed_delay_hours = 0
     
     query = text("""
         SELECT ph.timestamp 
@@ -54,3 +78,26 @@ def verify_data_integrity(commodity):
     except Exception as e:
         logger.error(f"Error checking database for {commodity} during health check: {e}")
         return False
+    
+def get_latest_timestamp_from_db(asset_name):
+    """
+    Queries the database for the newest timestamp recorded for a given asset.
+    Returns a datetime object if found, otherwise returns None.
+    """
+    query = text("""
+        SELECT ph.timestamp 
+        FROM price_history ph
+        JOIN assets a ON ph.asset_id = a.id
+        WHERE a.name ILIKE :name
+        ORDER BY ph.timestamp DESC
+        LIMIT 1;
+    """)
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(query, {"name": asset_name}).fetchone()
+            if result and result[0]:
+                # Strip timezone info to remain offset-naive and compatible with app setups
+                return result[0].replace(tzinfo=None)
+    except Exception as e:
+        logger.error(f"Failed to fetch baseline sync timestamp for {asset_name}: {e}")
+    return None

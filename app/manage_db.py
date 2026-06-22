@@ -1,6 +1,6 @@
 import pandas as pd
 from sqlalchemy import text
-from fetch_data import engine
+from functions import engine
 
 
 def print_row_counts():
@@ -99,18 +99,18 @@ def clear_database_data(commodity_name=None):
 if __name__ == "__main__":
     
     # Example 1: View row summary counts across Gold, Silver, Copper
-    # print_row_counts()
+    #print_row_counts()
     
     # Example 2: Manually check latest data entries for Gold
-    # print_latest_commodity_data("gold", limit=10)
+    print_latest_commodity_data("gold", limit=10)
     
     # Example 3: Manually check oldest data entries for Gold
-    print_oldest_commodity_data("gold", limit=10)
+    # print_oldest_commodity_data("gold", limit=10)
     
     # Example 4: Clear ONLY silver data (uncomment to run)
     # clear_database_data("silver")
     
     # Example 5: Nuke ALL historical data to start completely fresh (uncomment to run)
-    #clear_database_data()
+    # clear_database_data()
     
     ...

@@ -1,33 +1,10 @@
 import os
 import datetime
-import logging
-from logging.handlers import RotatingFileHandler
 import pandas as pd
 import requests
 from sqlalchemy import create_engine, text
-
-# --- CONFIGURATION ---
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LOG_DIR = os.path.join(BASE_DIR, "logs")
-DB_URL = "postgresql://admin:CommoditiesPredictionPass123@127.0.0.1:5433/market_predictions"
-engine = create_engine(DB_URL, echo=False)
-
-os.makedirs(LOG_DIR, exist_ok=True)
-
-# --- ROTATING LOGGER SETUP ---
-log_filename = os.path.join(LOG_DIR, "app.log")
-logger = logging.getLogger("BulletproofDataSync")
-logger.setLevel(logging.INFO)
-
-if not logger.handlers:
-    file_handler = RotatingFileHandler(log_filename, maxBytes=10*1024*1024, backupCount=2)
-    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
+import app.functions as fn
+from app.functions import logger, engine
 
 TICKER_MAPPING = {
     "Gold": "GC=F",
@@ -37,11 +14,8 @@ TICKER_MAPPING = {
 
 def fetch_and_save_commodity_data(requested_commodities=None):
     """
-    Fetches historical data from Yahoo Finance.
-    
-    requested_commodities: List of strings e.g., ['Gold'] or ['Gold', 'Copper']. 
-    
-    If None, fetches all available commodities.
+    Fetches missing delta historical data from Yahoo Finance and performs an
+    UPSERT to ensure recent partial candles are refreshed and completed.
     """
     if requested_commodities is None:
         targets = list(TICKER_MAPPING.keys())
@@ -55,14 +29,35 @@ def fetch_and_save_commodity_data(requested_commodities=None):
     logger.info(f"Executing network sync for: {', '.join(targets).title()}...")
     
     today = datetime.datetime.now()
-    one_year_ago = today - datetime.timedelta(days=1*365)
+    max_retention_limit = today - datetime.timedelta(days=720)
     
-    start_ts = int(one_year_ago.timestamp())
+    sync_plan = {}
+    oldest_required_start = today
+    
+    # Step 1: Establish correct lookback horizons per target asset
+    for asset_name in targets:
+        last_db_time = fn.get_latest_timestamp_from_db(asset_name)
+        
+        if last_db_time:
+            # Look back 2 hours prior to the latest entry to catch/overwrite incomplete candles
+            start_date = last_db_time - datetime.timedelta(hours=2)
+            if start_date < max_retention_limit:
+                start_date = max_retention_limit
+            logger.info(f"Incremental Sync Active: {asset_name} checking delta since {start_date}")
+        else:
+            start_date = max_retention_limit
+            logger.info(f"Full Baseline Ingestion Active for {asset_name}. Fetching maximum allowed window.")
+            
+        sync_plan[asset_name] = start_date
+        if start_date < oldest_required_start:
+            oldest_required_start = start_date
+
+    # Use the oldest required timestamp across all targets for the base queries
+    start_ts = int(oldest_required_start.timestamp())
     end_ts = int(today.timestamp())
 
     try:
-        logger.info("Downloading EUR/USD currency conversion baseline table...")
-        
+        logger.info(f"Downloading EUR/USD currency baseline grid back to {oldest_required_start}...")
         fx_url = "https://query2.finance.yahoo.com/v8/finance/chart/EURUSD=X"
         headers = {"User-Agent": "Mozilla/5.0"}
         fx_res = requests.get(fx_url, params={"period1": start_ts, "period2": end_ts, "interval": "1h"}, headers=headers, timeout=15)
@@ -101,13 +96,6 @@ def fetch_and_save_commodity_data(requested_commodities=None):
             closes = quote["close"]
             volumes = quote["volume"]
             
-            if asset_name in ["Gold", "Silver"]:
-                unit_divider = 31.1034768  # Convert Troy Ounce -> Grams
-            elif asset_name == "Copper":
-                unit_divider = 453.59237   # Convert Pounds -> Grams
-            else:
-                unit_divider = 1.0
-            
             records = []
             for i in range(len(timestamps)):
                 ts = timestamps[i]
@@ -124,10 +112,10 @@ def fetch_and_save_commodity_data(requested_commodities=None):
                 
                 records.append({
                     "Timestamp": hour_stamp,
-                    "Open_EUR": round((float(raw_open) / fx_rate) / unit_divider, 6),
-                    "High_EUR": round((float(raw_high) / fx_rate) / unit_divider, 6),
-                    "Low_EUR": round((float(raw_low) / fx_rate) / unit_divider, 6),
-                    "Close_EUR": round((float(closes[i]) / fx_rate) / unit_divider, 6),
+                    "Open_EUR": round((float(raw_open) / fx_rate), 6),
+                    "High_EUR": round((float(raw_high) / fx_rate), 6),
+                    "Low_EUR": round((float(raw_low) / fx_rate), 6),
+                    "Close_EUR": round((float(closes[i]) / fx_rate), 6),
                     "Volume": int(raw_vol)
                 })
                 
@@ -135,7 +123,6 @@ def fetch_and_save_commodity_data(requested_commodities=None):
                 continue
                 
             df = pd.DataFrame(records)
-            
             df = df.sort_values(by=['Timestamp', 'Volume'], ascending=[True, False])
             df = df.drop_duplicates(subset=['Timestamp'], keep='first')
             
@@ -144,7 +131,6 @@ def fetch_and_save_commodity_data(requested_commodities=None):
                 
                 if result:
                     asset_id = result[0]
-                    
                     df = df.rename(columns={
                         "Timestamp": "timestamp",
                         "Open_EUR": "open_eur",
@@ -153,30 +139,34 @@ def fetch_and_save_commodity_data(requested_commodities=None):
                         "Close_EUR": "close_eur",
                         "Volume": "volume"
                     })
-                    
                     df['asset_id'] = asset_id
                     
                     try:
-                        
                         db_records = df.to_dict(orient='records')
                         
+                        # CHANGED TO AN UPSERT: Overwrites price and volume metrics if timestamps match
                         insert_query = text("""
                             INSERT INTO price_history (asset_id, timestamp, open_eur, high_eur, low_eur, close_eur, volume)
                             VALUES (:asset_id, :timestamp, :open_eur, :high_eur, :low_eur, :close_eur, :volume)
-                            ON CONFLICT (asset_id, timestamp) DO NOTHING;
+                            ON CONFLICT (asset_id, timestamp) 
+                            DO UPDATE SET 
+                                open_eur = EXCLUDED.open_eur,
+                                high_eur = EXCLUDED.high_eur,
+                                low_eur = EXCLUDED.low_eur,
+                                close_eur = EXCLUDED.close_eur,
+                                volume = EXCLUDED.volume;
                             """)
                         
                         conn.execute(insert_query, db_records)
                         conn.commit()
-                        
-                        logger.info(f"Successfully committed {len(df)} rows to database for asset: {asset_name}")
+                        logger.info(f"Successfully synced and updated {len(df)} rows for asset: {asset_name}")
                         
                     except Exception as e:
                         logger.error(f"Failed to write data to database for {asset_name}: {str(e)}")
                 else:
-                    logger.error(f"Asset {asset_name} not found in database. Skipping database write.")
+                    logger.error(f"Asset {asset_name} not found in database. Skipping write.")
 
         logger.info("Requested commodity data processing completed.")
 
     except Exception as e:
-        logger.error(f"Critical execution error during data sync: {str(e)}")
+        logger.error(f"Critical execution error during data fetching: {str(e)}")
